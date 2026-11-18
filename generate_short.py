@@ -1,4 +1,4 @@
-import os, json, time, base64, subprocess, urllib.parse, requests
+import os, re, json, time, base64, subprocess, urllib.parse, requests
 from mutagen.mp3 import MP3
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"].strip()
@@ -7,9 +7,38 @@ STRATEGY_RULES = os.environ.get("STRATEGY_RULES", "")
 ROW_INDEX = os.environ.get("ROW_INDEX", "0")
 GAS_WEBHOOK = os.environ.get("GAS_WEBHOOK_URL", "")
 
-# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN (TỰ ĐỘNG THỬ LẠI & DỰ PHÒNG KHI SERVER GOOGLE QUÁ TẢI 503)
+def extract_json(text):
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if not match:
+        raise ValueError(f"Không tìm thấy JSON hợp lệ trong phản hồi: {text[:200]}")
+    return json.loads(match.group(0))
+
+# Lấy danh sách model thực tế đang mở trên API Key của bạn
+def get_available_models():
+    preferred = ["gemma-3-27b-it", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    try:
+        res = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}",
+            timeout=20
+        ).json()
+        valid = []
+        for m in res.get("models", []):
+            if "generateContent" in m.get("supportedGenerationMethods", []):
+                name = m["name"].replace("models/", "")
+                if any(k in name for k in ["flash", "gemma-3"]):
+                    valid.append(name)
+        ordered = [m for m in preferred if m in valid] + [m for m in valid if m not in preferred]
+        if ordered:
+            return ordered[:5]
+    except Exception:
+        pass
+    return preferred
+
+# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN (TỰ ĐỔI MODEL + TĂNG TIMEOUT 90S + DỰ PHÒNG 0 ĐỒNG)
 def run_multi_agent_script(topic, rules):
-    models = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.8-flash-lite"]
+    models = get_available_models()
+    print("Danh sách model khả dụng:", models)
+
     prompt = f"""Bạn là hệ thống 4 chuyên gia AI sản xuất YouTube Shorts kiếm tiền bền vững:
     1. DATA ANALYST: Tuân thủ quy tắc tối ưu từ dữ liệu kênh: "{rules}".
     2. CONTENT CREATOR: Viết kịch bản về "{topic}" theo lối kể chuyện phân tích chuyên sâu, giàu giá trị thực tế. Tránh liệt kê khô khan để không bị lỗi Repetitious Content.
@@ -18,7 +47,7 @@ def run_multi_agent_script(topic, rules):
        - Câu cuối cùng: Nối mượt với câu mở đầu để tạo vòng lặp vô tận (Seamless Loop).
     4. COMPLIANCE AUDITOR: Loại bỏ từ ngữ nhạy cảm/bạo lực. Chọn giọng đọc và tốc độ phù hợp.
 
-    Trả về JSON thuần:
+    Chỉ trả về duy nhất một khối JSON thuần túy (không giải thích thêm) theo đúng cấu trúc:
     {{
       "title": "Tiêu đề hấp dẫn dưới 60 ký tự kèm #Shorts",
       "description": "Mô tả ngắn giá trị video kèm 5 hashtag",
@@ -26,65 +55,50 @@ def run_multi_agent_script(topic, rules):
       "voice_gender": "female hoặc male",
       "voice_rate": "+5% hoặc +10% hoặc +0%",
       "image_prompts": [
-        "4 câu mô tả cảnh chi tiết bằng tiếng Anh, phong cách điện ảnh, không chữ, không logo bản quyền"
+        "Cảnh 1 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ",
+        "Cảnh 2 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ",
+        "Cảnh 3 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ",
+        "Cảnh 4 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ"
       ]
     }}"""
 
-    last_err = ""
-    for attempt in range(5):
-        model = models[attempt % len(models)]
+    for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
         try:
+            print(f"Đang gọi model: {model}...")
             res = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json"}
-            }, timeout=45).json()
+                "contents": [{"parts": [{"text": prompt}]}]
+            }, timeout=90).json()
 
             if "candidates" in res:
-                return json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
+                raw_text = res["candidates"][0]["content"]["parts"][0]["text"]
+                return extract_json(raw_text)
 
-            last_err = json.dumps(res, ensure_ascii=False)
-            print(f"Lần thử {attempt + 1} ({model}) server bận, đợi 15s thử lại: {last_err}")
+            print(f"Model {model} phản hồi lỗi, chuyển model tiếp theo: {json.dumps(res, ensure_ascii=False)[:180]}")
         except Exception as e:
-            last_err = str(e)
-            print(f"Lần thử {attempt + 1} lỗi mạng, đợi 15s thử lại: {last_err}")
+            print(f"Model {model} quá thời gian hoặc lỗi mạng, chuyển tiếp: {e}")
+        time.sleep(5)
 
-        time.sleep(15)
+    # Cổng dự phòng 0 đồng nếu toàn bộ server Google đều quá tải 503
+    print("Chuyển sang AI dự phòng miễn phí...")
+    fallback_res = requests.post(
+        "https://text.pollinations.ai/",
+        json={"messages": [{"role": "user", "content": prompt}], "model": "openai"},
+        timeout=90
+    )
+    return extract_json(fallback_res.text)
 
-    raise RuntimeError(f"Đã thử 5 lần nhưng Gemini API vẫn quá tải: {last_err}")
-
-# 2. SẢN XUẤT 4 ẢNH ĐỘC BẢN 9:16 (TỰ ĐỘNG DỰ PHÒNG NẾU HẾT QUOTA ẢNH GEMINI)
+# 2. SẢN XUẤT 4 ẢNH ĐỘC BẢN 9:16 (0% BẢN QUYỀN)
 def generate_images(prompts):
     img_paths = []
-    gemini_img_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_KEY}"
-
-    for idx, p in enumerate(prompts):
+    for idx, p in enumerate(prompts[:4]):
         safe_p = f"Vertical 9:16 original digital art, cinematic lighting, high detail, no text, no watermark: {p}"
         path = f"scene_{idx}.png"
-        saved = False
-
-        try:
-            res = requests.post(gemini_img_url, json={
-                "contents": [{"parts": [{"text": safe_p}]}],
-                "generationConfig": {"responseModalities": ["IMAGE"]}
-            }, timeout=30).json()
-            if "candidates" in res:
-                parts = res["candidates"][0]["content"]["parts"]
-                b64 = next((part["inlineData"]["data"] for part in parts if "inlineData" in part), None)
-                if b64:
-                    with open(path, "wb") as f:
-                        f.write(base64.b64decode(b64))
-                    saved = True
-        except Exception:
-            pass
-
-        if not saved:
-            encoded = urllib.parse.quote(safe_p)
-            fallback_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&seed={idx+101}"
-            img_data = requests.get(fallback_url, timeout=60).content
-            with open(path, "wb") as f:
-                f.write(img_data)
-
+        encoded = urllib.parse.quote(safe_p)
+        fallback_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&seed={idx+2026}"
+        img_data = requests.get(fallback_url, timeout=90).content
+        with open(path, "wb") as f:
+            f.write(img_data)
         img_paths.append(path)
     return img_paths
 
@@ -168,6 +182,7 @@ def upload_youtube(title, description):
 
 if __name__ == "__main__":
     data = run_multi_agent_script(TOPIC, STRATEGY_RULES)
+    print("Đã tạo xong kịch bản:", data["title"])
     imgs = generate_images(data["image_prompts"])
     dur = generate_voice(data)
     render_video(imgs, dur)
