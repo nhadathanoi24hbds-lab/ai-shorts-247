@@ -1,7 +1,7 @@
-import os, re, json, time, base64, subprocess, urllib.parse, requests
+import os, re, json, subprocess, urllib.parse, requests
 from mutagen.mp3 import MP3
 
-GEMINI_KEY = os.environ["GEMINI_API_KEY"].strip()
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 TOPIC = os.environ.get("TOPIC", "Sự thật tâm lý học hành vi")
 STRATEGY_RULES = os.environ.get("STRATEGY_RULES", "")
 ROW_INDEX = os.environ.get("ROW_INDEX", "0")
@@ -10,35 +10,11 @@ GAS_WEBHOOK = os.environ.get("GAS_WEBHOOK_URL", "")
 def extract_json(text):
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if not match:
-        raise ValueError(f"Không tìm thấy JSON hợp lệ trong phản hồi: {text[:200]}")
+        raise ValueError(f"Không tìm thấy JSON hợp lệ: {text[:200]}")
     return json.loads(match.group(0))
 
-# Lấy danh sách model thực tế đang mở trên API Key của bạn
-def get_available_models():
-    preferred = ["gemma-3-27b-it", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-    try:
-        res = requests.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}",
-            timeout=20
-        ).json()
-        valid = []
-        for m in res.get("models", []):
-            if "generateContent" in m.get("supportedGenerationMethods", []):
-                name = m["name"].replace("models/", "")
-                if any(k in name for k in ["flash", "gemma-3"]):
-                    valid.append(name)
-        ordered = [m for m in preferred if m in valid] + [m for m in valid if m not in preferred]
-        if ordered:
-            return ordered[:5]
-    except Exception:
-        pass
-    return preferred
-
-# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN (TỰ ĐỔI MODEL + TĂNG TIMEOUT 90S + DỰ PHÒNG 0 ĐỒNG)
+# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN SIÊU TỐC QUA GROQ (LLAMA 3.3 70B)
 def run_multi_agent_script(topic, rules):
-    models = get_available_models()
-    print("Danh sách model khả dụng:", models)
-
     prompt = f"""Bạn là hệ thống 4 chuyên gia AI sản xuất YouTube Shorts kiếm tiền bền vững:
     1. DATA ANALYST: Tuân thủ quy tắc tối ưu từ dữ liệu kênh: "{rules}".
     2. CONTENT CREATOR: Viết kịch bản về "{topic}" theo lối kể chuyện phân tích chuyên sâu, giàu giá trị thực tế. Tránh liệt kê khô khan để không bị lỗi Repetitious Content.
@@ -47,7 +23,7 @@ def run_multi_agent_script(topic, rules):
        - Câu cuối cùng: Nối mượt với câu mở đầu để tạo vòng lặp vô tận (Seamless Loop).
     4. COMPLIANCE AUDITOR: Loại bỏ từ ngữ nhạy cảm/bạo lực. Chọn giọng đọc và tốc độ phù hợp.
 
-    Chỉ trả về duy nhất một khối JSON thuần túy (không giải thích thêm) theo đúng cấu trúc:
+    Trả về duy nhất 1 JSON thuần (không giải thích) theo cấu trúc:
     {{
       "title": "Tiêu đề hấp dẫn dưới 60 ký tự kèm #Shorts",
       "description": "Mô tả ngắn giá trị video kèm 5 hashtag",
@@ -55,38 +31,36 @@ def run_multi_agent_script(topic, rules):
       "voice_gender": "female hoặc male",
       "voice_rate": "+5% hoặc +10% hoặc +0%",
       "image_prompts": [
-        "Cảnh 1 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ",
-        "Cảnh 2 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ",
-        "Cảnh 3 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ",
-        "Cảnh 4 mô tả bằng tiếng Anh, phong cách điện ảnh, không chữ"
+        "Scene 1 detailed cinematic prompt in English, no text",
+        "Scene 2 detailed cinematic prompt in English, no text",
+        "Scene 3 detailed cinematic prompt in English, no text",
+        "Scene 4 detailed cinematic prompt in English, no text"
       ]
     }}"""
 
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
-        try:
-            print(f"Đang gọi model: {model}...")
-            res = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}]
-            }, timeout=90).json()
+    if GROQ_KEY:
+        res = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.7
+            },
+            timeout=30
+        ).json()
+        if "choices" in res:
+            return extract_json(res["choices"][0]["message"]["content"])
+        print("Groq báo lỗi, chuyển sang cổng dự phòng:", res)
 
-            if "candidates" in res:
-                raw_text = res["candidates"][0]["content"]["parts"][0]["text"]
-                return extract_json(raw_text)
-
-            print(f"Model {model} phản hồi lỗi, chuyển model tiếp theo: {json.dumps(res, ensure_ascii=False)[:180]}")
-        except Exception as e:
-            print(f"Model {model} quá thời gian hoặc lỗi mạng, chuyển tiếp: {e}")
-        time.sleep(5)
-
-    # Cổng dự phòng 0 đồng nếu toàn bộ server Google đều quá tải 503
-    print("Chuyển sang AI dự phòng miễn phí...")
-    fallback_res = requests.post(
+    # Cổng dự phòng 0 đồng không cần API Key
+    fallback = requests.post(
         "https://text.pollinations.ai/",
         json={"messages": [{"role": "user", "content": prompt}], "model": "openai"},
-        timeout=90
+        timeout=60
     )
-    return extract_json(fallback_res.text)
+    return extract_json(fallback.text)
 
 # 2. SẢN XUẤT 4 ẢNH ĐỘC BẢN 9:16 (0% BẢN QUYỀN)
 def generate_images(prompts):
@@ -95,8 +69,8 @@ def generate_images(prompts):
         safe_p = f"Vertical 9:16 original digital art, cinematic lighting, high detail, no text, no watermark: {p}"
         path = f"scene_{idx}.png"
         encoded = urllib.parse.quote(safe_p)
-        fallback_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&seed={idx+2026}"
-        img_data = requests.get(fallback_url, timeout=90).content
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&seed={idx+2026}"
+        img_data = requests.get(url, timeout=90).content
         with open(path, "wb") as f:
             f.write(img_data)
         img_paths.append(path)
