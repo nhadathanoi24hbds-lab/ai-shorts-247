@@ -1,6 +1,7 @@
 import os, re, json, subprocess, urllib.parse, requests
 from concurrent.futures import ThreadPoolExecutor
 from mutagen.mp3 import MP3
+from gtts import gTTS
 
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 TOPIC = os.environ.get("TOPIC", "Sự thật tâm lý học hành vi")
@@ -59,7 +60,7 @@ def run_multi_agent_script(topic, rules):
     )
     return extract_json(fallback.text)
 
-# 2. TẢI SONG SONG 4 ẢNH CÙNG LÚC (~12 GIÂY THAY VÌ 90 GIÂY)
+# 2. TẢI SONG SONG 4 ẢNH CÙNG LÚC (~12 GIÂY)
 def download_one_image(args):
     idx, p = args
     safe_p = f"Vertical 9:16 digital art, cinematic lighting, high detail, no text: {p}"
@@ -75,16 +76,54 @@ def generate_images(prompts):
     with ThreadPoolExecutor(max_workers=4) as executor:
         return list(executor.map(download_one_image, enumerate(prompts[:4])))
 
-# 3. TẠO GIỌNG ĐỌC & PHỤ ĐỀ (~3 GIÂY)
+# Tạo phụ đề VTT tự động khớp thời lượng nếu dùng gTTS dự phòng
+def format_vtt_time(seconds):
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hrs:02d}:{mins:02d}:{secs:06.3f}"
+
+def build_vtt_subtitles(text, total_duration, filename="subs.vtt"):
+    words = text.split()
+    chunk_size = 9
+    chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    total_chars = sum(len(c) for c in chunks) or 1
+    current_time = 0.0
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("WEBVTT\n\n")
+        for idx, chunk in enumerate(chunks):
+            dur = (len(chunk) / total_chars) * total_duration
+            start_str = format_vtt_time(current_time)
+            end_str = format_vtt_time(min(current_time + dur, total_duration))
+            f.write(f"{idx + 1}\n{start_str} --> {end_str}\n{chunk}\n\n")
+            current_time += dur
+
+# 3. TẠO GIỌNG ĐỌC (ƯU TIÊN EDGE-TTS, TỰ ĐỘNG DỰ PHÒNG SANG GOOGLE TTS)
 def generate_voice(script_data):
+    text = script_data["voice_text"].strip()
     voice = "vi-VN-HoaiMyNeural" if script_data.get("voice_gender") == "female" else "vi-VN-NamMinhNeural"
     rate = script_data.get("voice_rate", "+5%")
-    subprocess.run([
-        "edge-tts", "--voice", voice, f"--rate={rate}",
-        "--text", script_data["voice_text"],
-        "--write-media", "voice.mp3", "--write-subtitles", "subs.vtt"
-    ], check=True)
-    return MP3("voice.mp3").info.length
+
+    try:
+        subprocess.run([
+            "edge-tts", "--voice", voice, f"--rate={rate}",
+            "--text", text,
+            "--write-media", "voice.mp3", "--write-subtitles", "subs.vtt"
+        ], check=True)
+        return MP3("voice.mp3").info.length
+    except Exception:
+        print("Edge-TTS tạm chặn IP, tự động chuyển sang Google TTS dự phòng...")
+        tts = gTTS(text=text, lang="vi", slow=False)
+        tts.save("raw_voice.mp3")
+        # Tăng nhẹ tốc độ 1.12x cho nhịp điệu Shorts cuốn hút
+        subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error", "-i", "raw_voice.mp3",
+            "-filter:a", "atempo=1.12", "voice.mp3"
+        ], check=True)
+        dur = MP3("voice.mp3").info.length
+        build_vtt_subtitles(text, dur, "subs.vtt")
+        return dur
 
 # 4. DỰNG VIDEO SONG SONG 4 CLIP Ở CHUẨN HD 720x1280 (~15 GIÂY)
 def render_one_clip(args):
