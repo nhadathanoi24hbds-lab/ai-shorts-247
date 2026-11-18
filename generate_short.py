@@ -1,4 +1,4 @@
-import os, json, base64, subprocess, urllib.parse, requests
+import os, json, time, base64, subprocess, urllib.parse, requests
 from mutagen.mp3 import MP3
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"].strip()
@@ -7,9 +7,9 @@ STRATEGY_RULES = os.environ.get("STRATEGY_RULES", "")
 ROW_INDEX = os.environ.get("ROW_INDEX", "0")
 GAS_WEBHOOK = os.environ.get("GAS_WEBHOOK_URL", "")
 
-# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN & TỐI ƯU GIỮ CHÂN (GEMINI 3.8 FLASH)
+# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN (TỰ ĐỘNG THỬ LẠI & DỰ PHÒNG KHI SERVER GOOGLE QUÁ TẢI 503)
 def run_multi_agent_script(topic, rules):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_KEY}"
+    models = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.8-flash-lite"]
     prompt = f"""Bạn là hệ thống 4 chuyên gia AI sản xuất YouTube Shorts kiếm tiền bền vững:
     1. DATA ANALYST: Tuân thủ quy tắc tối ưu từ dữ liệu kênh: "{rules}".
     2. CONTENT CREATOR: Viết kịch bản về "{topic}" theo lối kể chuyện phân tích chuyên sâu, giàu giá trị thực tế. Tránh liệt kê khô khan để không bị lỗi Repetitious Content.
@@ -30,15 +30,28 @@ def run_multi_agent_script(topic, rules):
       ]
     }}"""
 
-    res = requests.post(url, json={
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }).json()
+    last_err = ""
+    for attempt in range(5):
+        model = models[attempt % len(models)]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+        try:
+            res = requests.post(url, json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"}
+            }, timeout=45).json()
 
-    if "candidates" not in res:
-        raise RuntimeError(f"Lỗi từ Gemini API (Kịch bản): {json.dumps(res, ensure_ascii=False)}")
+            if "candidates" in res:
+                return json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
 
-    return json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
+            last_err = json.dumps(res, ensure_ascii=False)
+            print(f"Lần thử {attempt + 1} ({model}) server bận, đợi 15s thử lại: {last_err}")
+        except Exception as e:
+            last_err = str(e)
+            print(f"Lần thử {attempt + 1} lỗi mạng, đợi 15s thử lại: {last_err}")
+
+        time.sleep(15)
+
+    raise RuntimeError(f"Đã thử 5 lần nhưng Gemini API vẫn quá tải: {last_err}")
 
 # 2. SẢN XUẤT 4 ẢNH ĐỘC BẢN 9:16 (TỰ ĐỘNG DỰ PHÒNG NẾU HẾT QUOTA ẢNH GEMINI)
 def generate_images(prompts):
@@ -50,7 +63,6 @@ def generate_images(prompts):
         path = f"scene_{idx}.png"
         saved = False
 
-        # Thử gọi trực tiếp Gemini Image trước
         try:
             res = requests.post(gemini_img_url, json={
                 "contents": [{"parts": [{"text": safe_p}]}],
@@ -66,7 +78,6 @@ def generate_images(prompts):
         except Exception:
             pass
 
-        # Dự phòng 0 đồng nếu tài khoản mới bị giới hạn Free tier tạo ảnh của Google
         if not saved:
             encoded = urllib.parse.quote(safe_p)
             fallback_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&seed={idx+101}"
