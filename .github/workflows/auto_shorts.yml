@@ -1,0 +1,40 @@
+name: Auto AI Shorts 24/7
+
+on:
+  repository_dispatch:
+    types: [create_short]
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: 'Chủ đề chạy thử nghiệm'
+        required: false
+        default: '3 hiệu ứng tâm lý khiến người khác lập tức tin tưởng bạn'
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install FFmpeg & Libraries
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu
+          pip install requests edge-tts mutagen
+
+      - name: Run 4-in-1 AI Shorts Agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
+          TOPIC: ${{ github.event.client_payload.topic || github.event.inputs.topic }}
+          ROW_INDEX: ${{ github.event.client_payload.row_index || '0' }}
+          STRATEGY_RULES: ${{ github.event.client_payload.strategy_rules || 'Mở đầu bằng câu hỏi gây tò mò trong 3 giây đầu.' }}
+        run: python generate_short.py
