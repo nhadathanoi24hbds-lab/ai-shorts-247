@@ -1,4 +1,4 @@
-import os, json, base64, subprocess, requests
+import os, json, base64, subprocess, urllib.parse, requests
 from mutagen.mp3 import MP3
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"].strip()
@@ -7,9 +7,9 @@ STRATEGY_RULES = os.environ.get("STRATEGY_RULES", "")
 ROW_INDEX = os.environ.get("ROW_INDEX", "0")
 GAS_WEBHOOK = os.environ.get("GAS_WEBHOOK_URL", "")
 
-# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN & TỐI ƯU GIỮ CHÂN
+# 1. MULTI-AGENT: SÁNG TẠO KỊCH BẢN & TỐI ƯU GIỮ CHÂN (GEMINI 3.8 FLASH)
 def run_multi_agent_script(topic, rules):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_KEY}"
     prompt = f"""Bạn là hệ thống 4 chuyên gia AI sản xuất YouTube Shorts kiếm tiền bền vững:
     1. DATA ANALYST: Tuân thủ quy tắc tối ưu từ dữ liệu kênh: "{rules}".
     2. CONTENT CREATOR: Viết kịch bản về "{topic}" theo lối kể chuyện phân tích chuyên sâu, giàu giá trị thực tế. Tránh liệt kê khô khan để không bị lỗi Repetitious Content.
@@ -40,22 +40,40 @@ def run_multi_agent_script(topic, rules):
 
     return json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
 
-# 2. SẢN XUẤT 4 ẢNH ĐỘC BẢN 9:16 (0% BẢN QUYỀN)
+# 2. SẢN XUẤT 4 ẢNH ĐỘC BẢN 9:16 (TỰ ĐỘNG DỰ PHÒNG NẾU HẾT QUOTA ẢNH GEMINI)
 def generate_images(prompts):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={GEMINI_KEY}"
     img_paths = []
+    gemini_img_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_KEY}"
+
     for idx, p in enumerate(prompts):
         safe_p = f"Vertical 9:16 original digital art, cinematic lighting, high detail, no text, no watermark: {p}"
-        res = requests.post(url, json={"contents": [{"parts": [{"text": safe_p}]}]}).json()
-
-        if "candidates" not in res:
-            raise RuntimeError(f"Lỗi từ Gemini API (Tạo ảnh {idx+1}): {json.dumps(res, ensure_ascii=False)}")
-
-        parts = res["candidates"][0]["content"]["parts"]
-        b64 = next(part["inlineData"]["data"] for part in parts if "inlineData" in part)
         path = f"scene_{idx}.png"
-        with open(path, "wb") as f:
-            f.write(base64.b64decode(b64))
+        saved = False
+
+        # Thử gọi trực tiếp Gemini Image trước
+        try:
+            res = requests.post(gemini_img_url, json={
+                "contents": [{"parts": [{"text": safe_p}]}],
+                "generationConfig": {"responseModalities": ["IMAGE"]}
+            }, timeout=30).json()
+            if "candidates" in res:
+                parts = res["candidates"][0]["content"]["parts"]
+                b64 = next((part["inlineData"]["data"] for part in parts if "inlineData" in part), None)
+                if b64:
+                    with open(path, "wb") as f:
+                        f.write(base64.b64decode(b64))
+                    saved = True
+        except Exception:
+            pass
+
+        # Dự phòng 0 đồng nếu tài khoản mới bị giới hạn Free tier tạo ảnh của Google
+        if not saved:
+            encoded = urllib.parse.quote(safe_p)
+            fallback_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&seed={idx+101}"
+            img_data = requests.get(fallback_url, timeout=60).content
+            with open(path, "wb") as f:
+                f.write(img_data)
+
         img_paths.append(path)
     return img_paths
 
@@ -130,6 +148,9 @@ def upload_youtube(title, description):
         headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
         json=metadata
     )
+    if init_res.status_code not in (200, 201):
+        raise RuntimeError(f"Lỗi khởi tạo upload YouTube: {init_res.text}")
+
     with open("final_short.mp4", "rb") as f:
         vid_res = requests.put(init_res.headers["Location"], headers={"Content-Type": "video/mp4"}, data=f).json()
     return f"https://youtube.com/shorts/{vid_res['id']}"
