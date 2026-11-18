@@ -19,8 +19,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Python Libraries
-        run: pip install -q -U requests edge-tts gTTS mutagen
+      - name: Install FFmpeg & Python Libraries
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
+          pip install -q -U requests edge-tts gTTS mutagen
 
       - name: Run Fast AI Shorts Agent
         env:
