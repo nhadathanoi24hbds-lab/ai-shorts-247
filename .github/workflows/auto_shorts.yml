@@ -20,7 +20,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python Libraries
-        run: pip install -q requests edge-tts mutagen
+        run: pip install -q -U requests edge-tts gTTS mutagen
 
       - name: Run Fast AI Shorts Agent
         env:
