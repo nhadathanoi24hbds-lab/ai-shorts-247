@@ -1,7 +1,7 @@
 import os, json, base64, subprocess, requests
 from mutagen.mp3 import MP3
 
-GEMINI_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_KEY = os.environ["GEMINI_API_KEY"].strip()
 TOPIC = os.environ.get("TOPIC", "Sự thật tâm lý học hành vi")
 STRATEGY_RULES = os.environ.get("STRATEGY_RULES", "")
 ROW_INDEX = os.environ.get("ROW_INDEX", "0")
@@ -34,6 +34,10 @@ def run_multi_agent_script(topic, rules):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json"}
     }).json()
+
+    if "candidates" not in res:
+        raise RuntimeError(f"Lỗi từ Gemini API (Kịch bản): {json.dumps(res, ensure_ascii=False)}")
+
     return json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
 
 # 2. SẢN XUẤT 4 ẢNH ĐỘC BẢN 9:16 (0% BẢN QUYỀN)
@@ -43,6 +47,10 @@ def generate_images(prompts):
     for idx, p in enumerate(prompts):
         safe_p = f"Vertical 9:16 original digital art, cinematic lighting, high detail, no text, no watermark: {p}"
         res = requests.post(url, json={"contents": [{"parts": [{"text": safe_p}]}]}).json()
+
+        if "candidates" not in res:
+            raise RuntimeError(f"Lỗi từ Gemini API (Tạo ảnh {idx+1}): {json.dumps(res, ensure_ascii=False)}")
+
         parts = res["candidates"][0]["content"]["parts"]
         b64 = next(part["inlineData"]["data"] for part in parts if "inlineData" in part)
         path = f"scene_{idx}.png"
@@ -97,19 +105,22 @@ def render_video(img_paths, duration):
         "-i", "voice.mp3", "-i", "ambient_bgm.wav",
         "-filter_complex", f"[0:v]subtitles=subs.vtt:force_style='{sub_style}'[v];[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=2[a]",
         "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-shortest", "final_short.mp4"
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", "final_short.mp4"
     ], check=True)
 
 # 5. ĐĂNG YOUTUBE KÈM NHÃN MINH BẠCH AI
 def upload_youtube(title, description):
     token_res = requests.post("https://oauth2.googleapis.com/token", data={
-        "client_id": os.environ["YT_CLIENT_ID"],
-        "client_secret": os.environ["YT_CLIENT_SECRET"],
-        "refresh_token": os.environ["YT_REFRESH_TOKEN"],
+        "client_id": os.environ["YT_CLIENT_ID"].strip(),
+        "client_secret": os.environ["YT_CLIENT_SECRET"].strip(),
+        "refresh_token": os.environ["YT_REFRESH_TOKEN"].strip(),
         "grant_type": "refresh_token"
     }).json()
-    access_token = token_res["access_token"]
 
+    if "access_token" not in token_res:
+        raise RuntimeError(f"Lỗi xác thực YouTube Token: {json.dumps(token_res, ensure_ascii=False)}")
+
+    access_token = token_res["access_token"]
     metadata = {
         "snippet": {"title": title, "description": description, "categoryId": "27"},
         "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False, "containsSyntheticMedia": True}
@@ -129,5 +140,6 @@ if __name__ == "__main__":
     dur = generate_voice(data)
     render_video(imgs, dur)
     yt_url = upload_youtube(data["title"], data["description"])
+    print("ĐÃ ĐĂNG THÀNH CÔNG:", yt_url)
     if GAS_WEBHOOK:
         requests.post(GAS_WEBHOOK, json={"row": ROW_INDEX, "title": data["title"], "url": yt_url})
